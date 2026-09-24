@@ -1,3 +1,9 @@
+import {
+  analyzeNumberLexeme,
+  classifyFiniteDecimal,
+  NumberConversionStrategy,
+  type NumberLexemeAnalysis
+} from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
 /**
@@ -33,6 +39,27 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
+  // Strict JSON number lexemes take the shared, coercion-free decision path.
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis !== undefined) {
+    const exactStrategy = classifyFiniteDecimal(analysis, Number.parseFloat)
+    if (exactStrategy === NumberConversionStrategy.safe_number) {
+      return true
+    }
+
+    if (
+      config?.approx === true &&
+      exactStrategy === NumberConversionStrategy.lossless &&
+      isApproximatelyEqual(analysis, Number.parseFloat(value))
+    ) {
+      return true
+    }
+
+    return false
+  }
+
+  // Fallback for non-strict inputs (leading zeros, etc.): preserve the legacy
+  // behavior so this public utility does not regress on previously accepted text
   if (isInteger(value)) {
     return Number.isSafeInteger(Number.parseInt(value, 10))
   }
@@ -69,6 +96,27 @@ export function isSafeNumber(
   return false
 }
 
+/**
+ * Approximate-equality check for a strict lexeme classified as `lossless`:
+ * a floating point value is approximately equal when (1) it is not an integer,
+ * (2) the round-tripped value has at least 14 significant digits, and
+ * (3) those digits match. Decision input comes from the immutable lexeme
+ * analysis; only the final formatting comparison observes a Number.
+ */
+function isApproximatelyEqual(
+  analysis: NumberLexemeAnalysis,
+  num: number
+): boolean {
+  const parsedDigits = extractSignificantDigits(String(num))
+  const requiredDigits = 14
+
+  return (
+    analysis.kind !== 'integer' &&
+    parsedDigits.length >= requiredDigits &&
+    analysis.significantDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+  )
+}
+
 export enum UnsafeNumberReason {
   underflow = 'underflow',
   overflow = 'overflow',
@@ -82,6 +130,25 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis !== undefined) {
+    const strategy = classifyFiniteDecimal(analysis, Number.parseFloat)
+
+    switch (strategy) {
+      case NumberConversionStrategy.safe_number:
+        return undefined
+      case NumberConversionStrategy.bigint:
+        return UnsafeNumberReason.truncate_integer
+      case NumberConversionStrategy.overflow:
+        return UnsafeNumberReason.overflow
+      case NumberConversionStrategy.underflow:
+        return UnsafeNumberReason.underflow
+      case NumberConversionStrategy.lossless:
+        return UnsafeNumberReason.truncate_float
+    }
+  }
+
+  // legacy fallback for non-strict inputs (leading zeros, ...)
   if (isSafeNumber(value, { approx: false })) {
     return undefined
   }

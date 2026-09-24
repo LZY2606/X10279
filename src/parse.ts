@@ -1,4 +1,5 @@
 import { parseLosslessNumber } from './numberParsers.js'
+import { isDigit as isLexemeDigit, isNonZeroDigit } from './numberLexeme.js'
 import { revive } from './revive.js'
 import type { DuplicateKeyInfo, GenericObject, NumberParser, ParseOptions, Reviver } from './types'
 
@@ -207,30 +208,40 @@ export function parse(
       expectDigit(start)
     }
 
+    // The number token grammar is provided by the shared lexeme module: the
+    // scanner walks exactly the same character classes that
+    // parseLosslessNumber/isLosslessNumber/stringify classify with, so no
+    // numeric predicate is duplicated here. Intermediate malformed prefixes
+    // ('-', '2.', '2e') are still reported at their original source position.
     if (text.charCodeAt(i) === codeZero) {
       i++
     } else if (isNonZeroDigit(text.charCodeAt(i))) {
       i++
-      while (isDigit(text.charCodeAt(i))) {
+      while (isLexemeDigit(text.charCodeAt(i))) {
         i++
       }
+    } else {
+      i = start
     }
 
-    if (text.charCodeAt(i) === codeDot) {
+    if (i > start && text.charCodeAt(i) === codeDot) {
       i++
       expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
+      while (isLexemeDigit(text.charCodeAt(i))) {
         i++
       }
     }
 
-    if (text.charCodeAt(i) === codeLowercaseE || text.charCodeAt(i) === codeUppercaseE) {
+    if (
+      i > start &&
+      (text.charCodeAt(i) === codeLowercaseE || text.charCodeAt(i) === codeUppercaseE)
+    ) {
       i++
       if (text.charCodeAt(i) === codeMinus || text.charCodeAt(i) === codePlus) {
         i++
       }
       expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
+      while (isLexemeDigit(text.charCodeAt(i))) {
         i++
       }
     }
@@ -273,7 +284,7 @@ export function parse(
   }
 
   function expectDigit(start: number) {
-    if (!isDigit(text.charCodeAt(i))) {
+    if (!isLexemeDigit(text.charCodeAt(i))) {
       const numSoFar = text.slice(start, i)
       throw new SyntaxError(`Invalid number '${numSoFar}', expecting a digit ${gotAt()}`)
     }
@@ -343,14 +354,6 @@ function isHex(code: number): boolean {
     (code >= codeUppercaseA && code <= codeUppercaseF) ||
     (code >= codeLowercaseA && code <= codeLowercaseF)
   )
-}
-
-function isDigit(code: number): boolean {
-  return code >= codeZero && code <= codeNine
-}
-
-function isNonZeroDigit(code: number): boolean {
-  return code >= codeOne && code <= codeNine
 }
 
 export function isValidStringCharacter(code: number): boolean {

@@ -1,5 +1,6 @@
+import { isLosslessNumber } from './LosslessNumber.js'
+import { analyzeNumberLexeme } from './numberLexeme.js'
 import type { GenericObject, NumberStringifier, Replacer } from './types'
-import { isNumber } from './utils.js'
 
 /**
  * The LosslessJSON.stringify() method converts a JavaScript value to a JSON string,
@@ -56,7 +57,7 @@ export function stringify(
       const stringifier = numberStringifiers.find((item) => item.test(value))
       if (stringifier) {
         const str: unknown = stringifier.stringify(value)
-        if (typeof str !== 'string' || !isNumber(str)) {
+        if (typeof str !== 'string' || analyzeNumberLexeme(str) === undefined) {
           throw new Error(
             `Invalid JSON number: output of a number stringifier must be a string containing a JSON number (output: ${str})`
           )
@@ -80,9 +81,10 @@ export function stringify(
     }
 
     // lossless number, the secret ingredient :)
-    // @ts-expect-error
-    if (value?.isLosslessNumber) {
-      return value.toString()
+    if (isLosslessNumber(value)) {
+      // the lexeme was already classified by the shared analyzer when the
+      // LosslessNumber was created; emit the original text unchanged
+      return value.value
     }
 
     // BigInt
