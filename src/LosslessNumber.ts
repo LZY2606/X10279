@@ -1,11 +1,29 @@
 import {
+  analyzeNumberLexeme,
+  NumberConversion,
+  type NumberLexeme,
+  UnsafeNumberReason
+} from './numberLexeme.js'
+import {
   compareNumber,
   countSignificantDigits,
   getUnsafeNumberReason,
   isInteger,
-  isNumber,
-  UnsafeNumberReason
+  isNumber
 } from './utils.js'
+
+/**
+ * Immutable per-instance lexeme analysis, stored outside the public instance
+ * surface. This is the single analysis result that drives every conversion
+ * decision of a LosslessNumber; failed constructions never register an entry,
+ * so no temporary state can leak from a rejected call.
+ */
+const lexemes = new WeakMap<LosslessNumber, NumberLexeme>()
+
+/** @internal Shared read access to the production analysis of a value. */
+export function getLosslessNumberLexeme(value: LosslessNumber): NumberLexeme | undefined {
+  return lexemes.get(value)
+}
 
 /**
  * A lossless number. Stores its numeric value as string
@@ -23,6 +41,7 @@ export class LosslessNumber {
     }
 
     this.value = value
+    lexemes.set(this, analyzeNumberLexeme(value))
   }
 
   /**
@@ -37,19 +56,26 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const lexeme = lexemes.get(this) ?? analyzeNumberLexeme(this.value)
 
     // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
+    if (
+      lexeme.conversion === NumberConversion.number ||
+      lexeme.conversion === NumberConversion.truncate_float
+    ) {
       return Number.parseFloat(this.value)
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (lexeme.conversion === NumberConversion.bigint) {
       return BigInt(this.value)
     }
 
     // overflow or underflow
+    const unsafeReason =
+      lexeme.conversion === NumberConversion.overflow
+        ? UnsafeNumberReason.overflow
+        : UnsafeNumberReason.underflow
     throw new Error(
       `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
     )
@@ -68,11 +94,16 @@ export class LosslessNumber {
 }
 
 /**
- * Test whether a value is a LosslessNumber
+ * Test whether a value is a LosslessNumber.
+ *
+ * Besides the historical structural brand check, this confirms the value is
+ * backed by a genuine immutable lexeme analysis: a plain object literal with an
+ * `isLosslessNumber: true` flag alone is not a LosslessNumber.
  */
 export function isLosslessNumber(value: unknown): value is LosslessNumber {
-  // @ts-expect-error
-  return (value && typeof value === 'object' && value.isLosslessNumber) || false
+  // @ts-expect-error structural brand for backwards compatibility
+  const hasBrand = (value && typeof value === 'object' && value.isLosslessNumber) || false
+  return hasBrand && value instanceof LosslessNumber
 }
 
 /**
@@ -106,3 +137,5 @@ export function toLosslessNumber(value: number): LosslessNumber {
 export function compareLosslessNumber(a: LosslessNumber, b: LosslessNumber): 1 | 0 | -1 {
   return compareNumber(a.value, b.value)
 }
+
+export { getUnsafeNumberReason, isInteger }
