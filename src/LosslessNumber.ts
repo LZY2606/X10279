@@ -1,11 +1,12 @@
 import {
-  compareNumber,
-  countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
+  analyzeNumberLexeme,
+  decideNumberConversion,
+  getNumberLexeme,
+  type NumberLexeme,
+  NUMBER_LEXEME,
   UnsafeNumberReason
-} from './utils.js'
+} from './numberLexeme.js'
+import { compareNumber } from './utils.js'
 
 /**
  * A lossless number. Stores its numeric value as string
@@ -18,11 +19,34 @@ export class LosslessNumber {
   isLosslessNumber = true
 
   constructor(value: string) {
-    if (!isNumber(value)) {
-      throw new Error(`Invalid number (value: "${value}")`)
+    // Single immutable analysis shared by parseLosslessNumber, valueOf and
+    // stringify. Validation never passes the value through Number, so invalid
+    // lexemes are rejected without precision loss.
+    try {
+      const lexeme = analyzeNumberLexeme(value)
+      Object.defineProperty(this, NUMBER_LEXEME, {
+        value: lexeme,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      })
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid number (value: "${value}")`)
+      }
+      throw error
     }
 
     this.value = value
+  }
+
+  /**
+   * Internal, immutable lexical analysis backing this number. Not part of the
+   * public API; it exposes the exact analysis object shared with parse and
+   * stringify so conversion decisions cannot diverge.
+   */
+  get lexeme(): NumberLexeme {
+    return (this as unknown as Record<symbol, NumberLexeme>)[NUMBER_LEXEME]
   }
 
   /**
@@ -37,15 +61,20 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    // The decision comes from the same immutable analysis used by parse and
+    // stringify; this method never re-classifies the lexeme independently.
+    const { strategy, unsafeReason } = decideNumberConversion(getNumberLexeme(this))
 
     // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
+    if (
+      strategy === 'safe_number' ||
+      unsafeReason === UnsafeNumberReason.truncate_float
+    ) {
       return Number.parseFloat(this.value)
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (strategy === 'bigint') {
       return BigInt(this.value)
     }
 
@@ -71,7 +100,16 @@ export class LosslessNumber {
  * Test whether a value is a LosslessNumber
  */
 export function isLosslessNumber(value: unknown): value is LosslessNumber {
-  // @ts-expect-error
+  // Primary classification is the immutable lexeme analysis, which is what
+  // parseLosslessNumber attaches. The legacy duck-type marker stays as a
+  // fallback so external subclasses/brand copies keep being recognized.
+  if (value && typeof value === 'object') {
+    const holder = value as Record<symbol, unknown>
+    if (NUMBER_LEXEME in holder && holder[NUMBER_LEXEME] !== undefined) {
+      return true
+    }
+  }
+  // @ts-expect-error legacy brand, kept for backward compatibility
   return (value && typeof value === 'object' && value.isLosslessNumber) || false
 }
 
@@ -80,19 +118,19 @@ export function isLosslessNumber(value: unknown): value is LosslessNumber {
  * If the value has too many digits, or is NaN or Infinity, an error will be thrown
  */
 export function toLosslessNumber(value: number): LosslessNumber {
-  const maxDigits = 15
-  if (countSignificantDigits(String(value)) > maxDigits) {
-    throw new Error(
-      `Invalid number: contains more than 15 digits and is most likely truncated and unsafe by itself (value: ${value})`
-    )
-  }
-
   if (Number.isNaN(value)) {
     throw new Error('Invalid number: NaN')
   }
 
   if (!Number.isFinite(value)) {
     throw new Error(`Invalid number: ${value}`)
+  }
+
+  const maxDigits = 15
+  if (analyzeNumberLexeme(String(value)).significantDigitCount > maxDigits) {
+    throw new Error(
+      `Invalid number: contains more than 15 digits and is most likely truncated and unsafe by itself (value: ${value})`
+    )
   }
 
   return new LosslessNumber(String(value))

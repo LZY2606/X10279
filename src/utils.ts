@@ -1,3 +1,11 @@
+import {
+  analyzeNumberLexeme,
+  decideNumberConversion,
+  isSafeIntegerLexeme,
+  UnsafeNumberReason
+} from './numberLexeme.js'
+
+export { UnsafeNumberReason }
 import type { NumberSplit } from './types'
 
 /**
@@ -34,46 +42,26 @@ export function isSafeNumber(
   }
 ): boolean {
   if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
+    // structural comparison only; never routed through Number, so no
+    // precision can be lost before the decision
+    return isSafeIntegerLexeme(value)
   }
 
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
+  if (!isNumber(value)) {
+    // preserve historical behavior for non-number text
+    return false
+  }
 
-  if (value === parsed) {
+  // conversion decision derived from the shared immutable lexeme analysis
+  const conversion = decideNumberConversion(analyzeNumberLexeme(value), {
+    approx: config?.approx === true
+  })
+
+  if (conversion.unsafeReason === undefined) {
     return true
   }
 
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
-    return true
-  }
-
-  if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
-    const requiredDigits = 14
-    if (
-      !isInteger(value) &&
-      parsedDigits.length >= requiredDigits &&
-      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
-    ) {
-      return true
-    }
-  }
-
-  return false
-}
-
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
+  return config?.approx === true && conversion.approximateSafe
 }
 
 /**
@@ -82,24 +70,12 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
-    return undefined
+  if (!isNumber(value)) {
+    // invalid lexeme: historically this fell through to truncate_float
+    return UnsafeNumberReason.truncate_float
   }
 
-  if (isInteger(value)) {
-    return UnsafeNumberReason.truncate_integer
-  }
-
-  const num = Number.parseFloat(value)
-  if (!Number.isFinite(num)) {
-    return UnsafeNumberReason.overflow
-  }
-
-  if (num === 0) {
-    return UnsafeNumberReason.underflow
-  }
-
-  return UnsafeNumberReason.truncate_float
+  return decideNumberConversion(analyzeNumberLexeme(value)).unsafeReason
 }
 
 /**
