@@ -1,3 +1,8 @@
+import {
+  analyzeNumberLexeme,
+  isValidNumberLexeme,
+  NumberConversionStrategy
+} from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
 /**
@@ -14,10 +19,8 @@ const INTEGER_REGEX = /^-?[0-9]+$/
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return isValidNumberLexeme(value)
 }
-
-const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 /**
  * Test whether a string can be safely represented with a number
@@ -28,6 +31,93 @@ const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
  * Integer numbers must still be exactly equal.
  */
 export function isSafeNumber(
+  value: string,
+  config?: {
+    approx: boolean
+  }
+): boolean {
+  const analysis = analyzeIfLexeme(value)
+  if (!analysis) {
+    // Preserve the historical behavior for strings that are not JSON numbers.
+    return legacyIsSafeNumber(value, config)
+  }
+
+  switch (analysis.strategy) {
+    case NumberConversionStrategy.safe_number:
+    case NumberConversionStrategy.safe_integer:
+      return true
+    case NumberConversionStrategy.truncate_float:
+      if (config?.approx === true) {
+        // A value is approximately equal when the first 14 significant
+        // digits survive the IEEE-754 rounding.
+        const requiredDigits = 14
+        const parsedDigits = extractSignificantDigits(String(Number.parseFloat(value)))
+        return (
+          parsedDigits.length >= requiredDigits &&
+          analysis.significantDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+        )
+      }
+      return false
+    default:
+      return false
+  }
+}
+
+export enum UnsafeNumberReason {
+  underflow = 'underflow',
+  overflow = 'overflow',
+  truncate_integer = 'truncate_integer',
+  truncate_float = 'truncate_float'
+}
+
+/**
+ * When the provided value is an unsafe number, describe what the reason is:
+ * overflow, underflow, truncate_integer, or truncate_float.
+ * Returns undefined when the value is safe.
+ */
+export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  const analysis = analyzeIfLexeme(value)
+  if (!analysis) {
+    // Preserve the historical behavior for strings that are not JSON numbers.
+    return legacyGetUnsafeNumberReason(value)
+  }
+
+  switch (analysis.strategy) {
+    case NumberConversionStrategy.safe_number:
+    case NumberConversionStrategy.safe_integer:
+      return undefined
+    case NumberConversionStrategy.bigint:
+      return UnsafeNumberReason.truncate_integer
+    case NumberConversionStrategy.truncate_float:
+      return UnsafeNumberReason.truncate_float
+    case NumberConversionStrategy.overflow:
+      return UnsafeNumberReason.overflow
+    case NumberConversionStrategy.underflow:
+      return UnsafeNumberReason.underflow
+  }
+}
+
+// The single mapping from the immutable conversion strategy to the legacy
+// unsafe-reason vocabulary, kept next to getUnsafeNumberReason so the two can
+// never diverge.
+const STRATEGY_TO_UNSAFE_REASON: Partial<
+  Record<NumberConversionStrategy, UnsafeNumberReason>
+> = {
+  [NumberConversionStrategy.bigint]: UnsafeNumberReason.truncate_integer,
+  [NumberConversionStrategy.truncate_float]: UnsafeNumberReason.truncate_float,
+  [NumberConversionStrategy.overflow]: UnsafeNumberReason.overflow,
+  [NumberConversionStrategy.underflow]: UnsafeNumberReason.underflow
+}
+
+export { STRATEGY_TO_UNSAFE_REASON }
+
+function analyzeIfLexeme(value: string) {
+  return isValidNumberLexeme(value) ? analyzeNumberLexeme(value) : undefined
+}
+
+// Legacy fallback for non-lexeme inputs, kept byte-for-byte with the previous
+// behavior (these inputs never occur in the JSON parsing production path).
+function legacyIsSafeNumber(
   value: string,
   config?: {
     approx: boolean
@@ -52,10 +142,6 @@ export function isSafeNumber(
   }
 
   if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
     const requiredDigits = 14
     if (
       !isInteger(value) &&
@@ -69,20 +155,8 @@ export function isSafeNumber(
   return false
 }
 
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
-}
-
-/**
- * When the provided value is an unsafe number, describe what the reason is:
- * overflow, underflow, truncate_integer, or truncate_float.
- * Returns undefined when the value is safe.
- */
-export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
+function legacyGetUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  if (legacyIsSafeNumber(value, { approx: false })) {
     return undefined
   }
 
@@ -215,7 +289,7 @@ export function countSignificantDigits(value: string): number {
 }
 
 /**
- * Get the significant digits of a number.
+ * Get the significant digits of a value.
  *
  * For example:
  *   '2.34' returns '234'

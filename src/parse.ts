@@ -1,4 +1,5 @@
 import { parseLosslessNumber } from './numberParsers.js'
+import { scanNumberLexeme } from './numberLexeme.js'
 import { revive } from './revive.js'
 import type { DuplicateKeyInfo, GenericObject, NumberParser, ParseOptions, Reviver } from './types'
 
@@ -202,42 +203,21 @@ export function parse(
 
   function parseNumeric() {
     const start = i
-    if (text.charCodeAt(i) === codeMinus) {
-      i++
+    const { token, error } = scanNumberLexeme(text, start)
+
+    if (!token.started) {
+      return undefined
+    }
+
+    if (error) {
+      // Point at the exact missing-digit position in the original input,
+      // preserving the historical error message.
+      i = error.at
       expectDigit(start)
     }
 
-    if (text.charCodeAt(i) === codeZero) {
-      i++
-    } else if (isNonZeroDigit(text.charCodeAt(i))) {
-      i++
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
-
-    if (text.charCodeAt(i) === codeDot) {
-      i++
-      expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
-
-    if (text.charCodeAt(i) === codeLowercaseE || text.charCodeAt(i) === codeUppercaseE) {
-      i++
-      if (text.charCodeAt(i) === codeMinus || text.charCodeAt(i) === codePlus) {
-        i++
-      }
-      expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
-
-    if (i > start) {
-      return parseNumber(text.slice(start, i))
-    }
+    i = token.end
+    return parseNumber(text.slice(start, token.end))
   }
 
   function eatComma() {
@@ -349,10 +329,6 @@ function isDigit(code: number): boolean {
   return code >= codeZero && code <= codeNine
 }
 
-function isNonZeroDigit(code: number): boolean {
-  return code >= codeOne && code <= codeNine
-}
-
 export function isValidStringCharacter(code: number): boolean {
   return code >= 0x20 && code <= 0x10ffff
 }
@@ -401,17 +377,11 @@ const codeNewline = 0xa // "\n"
 const codeTab = 0x9 // "\t"
 const codeReturn = 0xd // "\r"
 const codeDoubleQuote = 0x0022 // "
-const codePlus = 0x2b // "+"
-const codeMinus = 0x2d // "-"
 const codeZero = 0x30
-const codeOne = 0x31
 const codeNine = 0x39
 const codeComma = 0x2c // ","
-const codeDot = 0x2e // "." (dot, period)
 const codeColon = 0x3a // ":"
 export const codeUppercaseA = 0x41 // "A"
 export const codeLowercaseA = 0x61 // "a"
-export const codeUppercaseE = 0x45 // "E"
-export const codeLowercaseE = 0x65 // "e"
 export const codeUppercaseF = 0x46 // "F"
 export const codeLowercaseF = 0x66 // "f"

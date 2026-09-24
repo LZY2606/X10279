@@ -1,8 +1,13 @@
 import {
+  analyzeNumberLexeme,
+  type NumberLexemeAnalysis,
+  numberLexemeAnalysisSymbol,
+  NumberConversionStrategy,
+  isValidNumberLexeme
+} from './numberLexeme.js'
+import {
   compareNumber,
   countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
   isNumber,
   UnsafeNumberReason
 } from './utils.js'
@@ -23,6 +28,18 @@ export class LosslessNumber {
     }
 
     this.value = value
+
+    // The single immutable analysis this number's conversion decisions are
+    // based on. Attached via a non-enumerable symbol: it is internal shared
+    // production state, not a public property, and leaves no enumerable
+    // footprint on successful values.
+    const analysis = analyzeNumberLexeme(value)
+    Object.defineProperty(this, numberLexemeAnalysisSymbol, {
+      value: analysis,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    })
   }
 
   /**
@@ -37,22 +54,28 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const analysis: NumberLexemeAnalysis = (this as Record<symbol, NumberLexemeAnalysis>)[
+      numberLexemeAnalysisSymbol
+    ]
 
-    // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
-      return Number.parseFloat(this.value)
+    switch (analysis.strategy) {
+      // safe or truncate_float
+      case NumberConversionStrategy.safe_number:
+      case NumberConversionStrategy.safe_integer:
+      case NumberConversionStrategy.truncate_float:
+        return Number.parseFloat(analysis.lexeme)
+
+      // truncate_integer
+      case NumberConversionStrategy.bigint:
+        return BigInt(analysis.lexeme)
+
+      // overflow or underflow
+      case NumberConversionStrategy.overflow:
+      case NumberConversionStrategy.underflow:
+        throw new Error(
+          `Cannot safely convert to number: the value '${this.value}' would ${analysis.strategy} and become ${Number.parseFloat(this.value)}`
+        )
     }
-
-    // truncate_integer
-    if (isInteger(this.value)) {
-      return BigInt(this.value)
-    }
-
-    // overflow or underflow
-    throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
-    )
   }
 
   /**
@@ -66,6 +89,28 @@ export class LosslessNumber {
   // or use that, it cannot safely turn the numeric value in the string into
   // stringified JSON since it has to be parsed into a number first.
 }
+
+/**
+ * Internal (non-exported in index.ts) read-only accessor for the shared,
+ * immutable lexeme analysis attached to a LosslessNumber. It exposes the very
+ * same object used by the production valueOf() conversion path; tests use it
+ * only to assert invariants, never to drive behavior.
+ */
+export function getLosslessNumberLexemeAnalysis(
+  value: LosslessNumber
+): NumberLexemeAnalysis | undefined {
+  return (value as unknown as Record<symbol, NumberLexemeAnalysis | undefined>)[
+    numberLexemeAnalysisSymbol
+  ]
+}
+
+export {
+  analyzeNumberLexeme,
+  isValidNumberLexeme,
+  numberLexemeAnalysisSymbol,
+  NumberConversionStrategy
+}
+export type { NumberLexemeAnalysis }
 
 /**
  * Test whether a value is a LosslessNumber
