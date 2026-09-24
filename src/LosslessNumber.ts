@@ -1,9 +1,9 @@
+import { analyzeNumberLexeme } from './numberLexeme.js'
 import {
   compareNumber,
   countSignificantDigits,
   getUnsafeNumberReason,
   isInteger,
-  isNumber,
   UnsafeNumberReason
 } from './utils.js'
 
@@ -18,7 +18,7 @@ export class LosslessNumber {
   isLosslessNumber = true
 
   constructor(value: string) {
-    if (!isNumber(value)) {
+    if (analyzeNumberLexeme(value) === undefined) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
