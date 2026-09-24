@@ -1,23 +1,20 @@
+import { analyzeNumberLexeme, NumberConversion } from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
 /**
  * Test whether a string contains an integer number
  */
 export function isInteger(value: string): boolean {
-  return INTEGER_REGEX.test(value)
+  return analyzeNumberLexeme(value).isIntegerLexeme
 }
-
-const INTEGER_REGEX = /^-?[0-9]+$/
 
 /**
  * Test whether a string contains a number
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return analyzeNumberLexeme(value).valid
 }
-
-const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 /**
  * Test whether a string can be safely represented with a number
@@ -33,7 +30,43 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
+  const analysis = analyzeNumberLexeme(value)
+
+  if (!analysis.valid) {
+    // Preserve the historical behavior for non-JSON-number inputs.
+    return legacyIsSafeNumber(value, config)
+  }
+
+  if (
+    analysis.conversion === NumberConversion.number ||
+    analysis.unsafeReason === undefined
+  ) {
+    return true
+  }
+
+  if (config?.approx === true && analysis.unsafeReason === UnsafeNumberReason.truncate_float) {
+    // A value is approximately equal when:
+    // 1. it is a floating point number, not an integer
+    // 2. it has at least 14 digits
+    // 3. the first 14 digits are equal
+    const requiredDigits = 14
+    const parsedDigits = extractSignificantDigits(String(Number.parseFloat(value)))
+    return (
+      parsedDigits.length >= requiredDigits &&
+      analysis.significantDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+    )
+  }
+
+  return false
+}
+
+function legacyIsSafeNumber(
+  value: string,
+  config?: {
+    approx: boolean
+  }
+): boolean {
+  if (/^-?[0-9]+$/.test(value)) {
     return Number.isSafeInteger(Number.parseInt(value, 10))
   }
 
@@ -52,13 +85,9 @@ export function isSafeNumber(
   }
 
   if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
     const requiredDigits = 14
     if (
-      !isInteger(value) &&
+      !/^-?[0-9]+$/.test(value) &&
       parsedDigits.length >= requiredDigits &&
       valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
     ) {
@@ -82,11 +111,25 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
+  const analysis = analyzeNumberLexeme(value)
+
+  if (!analysis.valid) {
+    return legacyGetUnsafeNumberReason(value)
+  }
+
+  if (analysis.unsafeReason === undefined) {
     return undefined
   }
 
-  if (isInteger(value)) {
+  return analysis.unsafeReason as UnsafeNumberReason
+}
+
+function legacyGetUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  if (legacyIsSafeNumber(value, { approx: false })) {
+    return undefined
+  }
+
+  if (/^-?[0-9]+$/.test(value)) {
     return UnsafeNumberReason.truncate_integer
   }
 

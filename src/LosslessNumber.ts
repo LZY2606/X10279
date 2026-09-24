@@ -1,11 +1,13 @@
 import {
   compareNumber,
   countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
+  getUnsafeNumberReason
 } from './utils.js'
+import {
+  analyzeNumberLexeme,
+  NumberConversion,
+  type NumberLexemeAnalysis
+} from './numberLexeme.js'
 
 /**
  * A lossless number. Stores its numeric value as string
@@ -17,12 +19,18 @@ export class LosslessNumber {
   // type information
   isLosslessNumber = true
 
+  // Immutable lexical classification shared with parse/stringify. Held on the
+  // instance (never on module state) so retries are isolated and idempotent.
+  private readonly lexemeAnalysis: NumberLexemeAnalysis
+
   constructor(value: string) {
-    if (!isNumber(value)) {
+    const analysis = analyzeNumberLexeme(value)
+    if (!analysis.valid) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
     this.value = value
+    this.lexemeAnalysis = analysis
   }
 
   /**
@@ -37,19 +45,21 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
-
-    // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
+    // safe integer, safe float or truncate_float become a Number
+    if (
+      this.lexemeAnalysis.conversion === NumberConversion.number ||
+      this.lexemeAnalysis.kind === 'truncate_float'
+    ) {
       return Number.parseFloat(this.value)
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (this.lexemeAnalysis.conversion === NumberConversion.bigint) {
       return BigInt(this.value)
     }
 
     // overflow or underflow
+    const unsafeReason = getUnsafeNumberReason(this.value)
     throw new Error(
       `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
     )
@@ -65,6 +75,18 @@ export class LosslessNumber {
   // Note: we do NOT implement a .toJSON() method, and you should not implement
   // or use that, it cannot safely turn the numeric value in the string into
   // stringified JSON since it has to be parsed into a number first.
+}
+
+/**
+ * Get the immutable lexical analysis of a LosslessNumber.
+ *
+ * INTERNAL: this is intentionally not exported from the package index. It is
+ * shared by tests and production code alike — it exposes the exact same
+ * frozen analysis instance that drives `valueOf()`, never a test-only copy of
+ * the algorithm.
+ */
+export function getLosslessNumberAnalysis(value: LosslessNumber): NumberLexemeAnalysis {
+  return (value as unknown as { lexemeAnalysis: NumberLexemeAnalysis }).lexemeAnalysis
 }
 
 /**
