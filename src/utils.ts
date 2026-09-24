@@ -1,3 +1,4 @@
+import { analyzeNumber, extractSignificantDigitsFromText, isNumberLexeme } from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
 /**
@@ -33,39 +34,43 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
+  // Strict JSON numbers use the single, unified lexical analysis.
+  if (isNumberLexeme(value)) {
+    const conversion = analyzeNumber(value).conversion
+    if (
+      conversion === 'safe_number' ||
+      (config?.approx === true && conversion === 'truncate_float')
+    ) {
+      return true
+    }
+
+    if (config?.approx !== true) {
+      return false
+    }
+
+    // approx: a truncating float whose first 14 significant digits round-trip
+    const num = Number.parseFloat(value)
+    const valueDigits = extractSignificantDigits(value)
+    const parsedDigits = extractSignificantDigits(String(num))
+    const requiredDigits = 14
+    return (
+      !isInteger(value) &&
+      parsedDigits.length >= requiredDigits &&
+      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+    )
+  }
+
+  // Legacy tolerant path for non-strict inputs (leading zeros and such): keep
+  // the established behavior so the public helpers stay backward compatible.
   if (isInteger(value)) {
     return Number.isSafeInteger(Number.parseInt(value, 10))
   }
 
   const num = Number.parseFloat(value)
   const parsed = String(num)
-
-  if (value === parsed) {
+  if (value === parsed || extractSignificantDigits(value) === extractSignificantDigits(parsed)) {
     return true
   }
-
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
-    return true
-  }
-
-  if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
-    const requiredDigits = 14
-    if (
-      !isInteger(value) &&
-      parsedDigits.length >= requiredDigits &&
-      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
-    ) {
-      return true
-    }
-  }
-
   return false
 }
 
@@ -82,23 +87,35 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  if (isNumberLexeme(value)) {
+    switch (analyzeNumber(value).conversion) {
+      case 'safe_number':
+        return undefined
+      case 'bigint':
+        return UnsafeNumberReason.truncate_integer
+      case 'truncate_float':
+        return UnsafeNumberReason.truncate_float
+      case 'overflow':
+        return UnsafeNumberReason.overflow
+      case 'underflow':
+        return UnsafeNumberReason.underflow
+    }
+  }
+
+  // Legacy tolerant path for non-strict inputs.
   if (isSafeNumber(value, { approx: false })) {
     return undefined
   }
-
   if (isInteger(value)) {
     return UnsafeNumberReason.truncate_integer
   }
-
   const num = Number.parseFloat(value)
   if (!Number.isFinite(num)) {
     return UnsafeNumberReason.overflow
   }
-
   if (num === 0) {
     return UnsafeNumberReason.underflow
   }
-
   return UnsafeNumberReason.truncate_float
 }
 
@@ -224,16 +241,7 @@ export function countSignificantDigits(value: string): number {
  *   '120.5e+30' returns '1205'
  **/
 export function extractSignificantDigits(value: string): string {
-  const { start, end } = getSignificantDigitRange(value)
-
-  const digits = value.substring(start, end)
-
-  const dot = digits.indexOf('.')
-  if (dot === -1) {
-    return digits
-  }
-
-  return digits.substring(0, dot) + digits.substring(dot + 1)
+  return extractSignificantDigitsFromText(value)
 }
 
 /**

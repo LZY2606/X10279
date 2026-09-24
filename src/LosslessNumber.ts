@@ -1,11 +1,10 @@
 import {
-  compareNumber,
-  countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
-} from './utils.js'
+  analyzeNumber,
+  convertLexeme,
+  type NumberLexeme,
+  numberLexemeSlot
+} from './numberLexeme.js'
+import { compareNumber, countSignificantDigits, isNumber } from './utils.js'
 
 /**
  * A lossless number. Stores its numeric value as string
@@ -17,12 +16,42 @@ export class LosslessNumber {
   // type information
   isLosslessNumber = true
 
+  // Immutable lexical analysis backing every conversion decision.
+  // Non-enumerable so it never changes the observable object shape, JSON
+  // round trips or default output.
+  declare readonly [numberLexemeSlot]: NumberLexeme
+
   constructor(value: string) {
     if (!isNumber(value)) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
     this.value = value
+    Object.defineProperty(this, numberLexemeSlot, {
+      value: analyzeNumber(value),
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+  }
+
+  /**
+   * Internal factory used by the parser to build a LosslessNumber from the
+   * lexeme analysis already produced during tokenization. It shares the exact
+   * production path of the public constructor (same validation and the same
+   * immutable analysis); it merely skips scanning the same text twice.
+   */
+  static fromLexeme(lexeme: NumberLexeme): LosslessNumber {
+    const number = Object.create(LosslessNumber.prototype) as LosslessNumber
+    number.value = lexeme.text
+    number.isLosslessNumber = true
+    Object.defineProperty(number, numberLexemeSlot, {
+      value: lexeme,
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
+    return number
   }
 
   /**
@@ -37,22 +66,7 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
-
-    // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
-      return Number.parseFloat(this.value)
-    }
-
-    // truncate_integer
-    if (isInteger(this.value)) {
-      return BigInt(this.value)
-    }
-
-    // overflow or underflow
-    throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
-    )
+    return convertLexeme(this[numberLexemeSlot])
   }
 
   /**
