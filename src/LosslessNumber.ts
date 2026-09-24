@@ -1,10 +1,8 @@
 import {
+  analyzeNumberLexeme,
   compareNumber,
   countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
+  isNumber
 } from './utils.js'
 
 /**
@@ -37,22 +35,23 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const analysis = analyzeNumberLexeme(this.value)
 
-    // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
-      return Number.parseFloat(this.value)
+    switch (analysis.conversion) {
+      // safe or truncate_float
+      case 'number':
+        return Number.parseFloat(this.value)
+
+      // truncate_integer
+      case 'bigint':
+        return BigInt(this.value)
+
+      // overflow or underflow
+      default:
+        throw new Error(
+          `Cannot safely convert to number: the value '${this.value}' would ${analysis.unsafeReason} and become ${Number.parseFloat(this.value)}`
+        )
     }
-
-    // truncate_integer
-    if (isInteger(this.value)) {
-      return BigInt(this.value)
-    }
-
-    // overflow or underflow
-    throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
-    )
   }
 
   /**

@@ -33,21 +33,8 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
-  }
-
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
-
-  if (value === parsed) {
-    return true
-  }
-
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis.unsafeReason === undefined) {
     return true
   }
 
@@ -57,8 +44,10 @@ export function isSafeNumber(
     // 2. it has at least 14 digits
     // 3. the first 14 digits are equal
     const requiredDigits = 14
+    const parsedDigits = extractSignificantDigits(String(Number.parseFloat(value)))
+    const valueDigits = extractSignificantDigits(value)
     if (
-      !isInteger(value) &&
+      !analysis.isInteger &&
       parsedDigits.length >= requiredDigits &&
       valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
     ) {
@@ -77,16 +66,109 @@ export enum UnsafeNumberReason {
 }
 
 /**
- * When the provided value is an unsafe number, describe what the reason is:
- * overflow, underflow, truncate_integer, or truncate_float.
- * Returns undefined when the value is safe.
+ * The conversion strategy decided for a number lexeme:
+ *
+ * - `'number'`: the lexeme can be converted to a regular number, either exactly
+ *   or (for `truncate_float`) losing only insignificant digits
+ * - `'bigint'`: the lexeme is an integer that does not fit safely in a number
+ *   and must be converted to a bigint to stay lossless
+ * - `'never'`: the lexeme cannot be converted without unacceptable loss
+ *   (overflow/underflow), or is not a valid number lexeme at all
  */
-export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
+export type NumberConversion = 'number' | 'bigint' | 'never'
+
+/**
+ * An immutable analysis of a number lexeme. This is the single source from
+ * which the classification (`isNumber`, `isInteger`, `isNegativeZero`) and the
+ * conversion decision (`unsafeReason`, `conversion`) of a numeric lexeme are
+ * derived. The decision is made from the lexeme string itself: it is never
+ * routed through a lossy `Number` round-trip first.
+ *
+ * The analysis is pure and stateless: it keeps no cache, counter, or temporary
+ * state between calls, so a failed conversion cannot influence later results.
+ *
+ * Note: this is an internal building block shared by the production code paths
+ * (`LosslessNumber.valueOf`, `isSafeNumber`, `getUnsafeNumberReason`,
+ * `toSafeNumberOrThrow`, `splitNumber`). It is deliberately not exported from
+ * the package entry point.
+ */
+export interface NumberLexemeAnalysis {
+  // the analyzed lexeme, exactly as provided
+  readonly lexeme: string
+  // whether the lexeme is a valid JSON number
+  readonly isNumber: boolean
+  // whether the lexeme is an integer number (no dot, no exponent)
+  readonly isInteger: boolean
+  // whether the lexeme is a negative zero like '-0', '-0.0', or '-0e3'
+  readonly isNegativeZero: boolean
+  // the lexeme split into sign, digits, and exponent (undefined when not splittable)
+  readonly split: Readonly<NumberSplit> | undefined
+  // why the lexeme is unsafe to convert to a number, undefined when safe
+  readonly unsafeReason: UnsafeNumberReason | undefined
+  // the conversion strategy decided for the lexeme
+  readonly conversion: NumberConversion
+}
+
+/**
+ * Analyze a number lexeme once, and return an immutable result describing the
+ * classification of the lexeme and the decided conversion strategy.
+ */
+export function analyzeNumberLexeme(value: string): NumberLexemeAnalysis {
+  const number = isNumber(value)
+  const integer = isInteger(value)
+  const split = splitNumberOrUndefined(value)
+  const unsafeReason = computeUnsafeNumberReason(value, integer)
+
+  const conversion: NumberConversion = !number
+    ? 'never'
+    : unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float
+      ? 'number'
+      : integer
+        ? 'bigint'
+        : 'never'
+
+  return Object.freeze({
+    lexeme: value,
+    isNumber: number,
+    isInteger: integer,
+    isNegativeZero: split !== undefined && value.charAt(0) === '-' && split.digits === '0',
+    split,
+    unsafeReason,
+    conversion
+  })
+}
+
+/**
+ * Strict safety check (approx = false), shared by analyzeNumberLexeme
+ */
+function isSafeNumberStrict(value: string, integer: boolean): boolean {
+  if (integer) {
+    return Number.isSafeInteger(Number.parseInt(value, 10))
+  }
+
+  const num = Number.parseFloat(value)
+  const parsed = String(num)
+
+  if (value === parsed) {
+    return true
+  }
+
+  return extractSignificantDigits(value) === extractSignificantDigits(parsed)
+}
+
+/**
+ * Compute the reason why a lexeme is unsafe to convert to a number,
+ * shared by analyzeNumberLexeme
+ */
+function computeUnsafeNumberReason(
+  value: string,
+  integer: boolean
+): UnsafeNumberReason | undefined {
+  if (isSafeNumberStrict(value, integer)) {
     return undefined
   }
 
-  if (isInteger(value)) {
+  if (integer) {
     return UnsafeNumberReason.truncate_integer
   }
 
@@ -102,6 +184,16 @@ export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undef
   return UnsafeNumberReason.truncate_float
 }
 
+
+/**
+ * When the provided value is an unsafe number, describe what the reason is:
+ * overflow, underflow, truncate_integer, or truncate_float.
+ * Returns undefined when the value is safe.
+ */
+export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  return analyzeNumberLexeme(value).unsafeReason
+}
+
 /**
  * Convert a string into a number when it is safe to do so.
  * Throws an error otherwise, explaining the reason.
@@ -114,7 +206,7 @@ export function toSafeNumberOrThrow(
 ): number {
   const number = Number.parseFloat(value)
 
-  const unsafeReason = getUnsafeNumberReason(value)
+  const unsafeReason = analyzeNumberLexeme(value).unsafeReason
   if (
     config?.approx === true
       ? unsafeReason && unsafeReason !== UnsafeNumberReason.truncate_float
@@ -141,9 +233,22 @@ export function toSafeNumberOrThrow(
  *
  */
 export function splitNumber(value: string): NumberSplit {
+  const split = splitNumberOrUndefined(value)
+  if (split === undefined) {
+    throw new SyntaxError(`Invalid number: ${value}`)
+  }
+
+  return split
+}
+
+/**
+ * Split a number into sign, digits, and exponent, or return undefined
+ * when the value cannot be split. Shared by analyzeNumberLexeme.
+ */
+function splitNumberOrUndefined(value: string): NumberSplit | undefined {
   const match = value.match(/^(-?)(\d+\.?\d*)([eE]([+-]?\d+))?$/)
   if (!match) {
-    throw new SyntaxError(`Invalid number: ${value}`)
+    return undefined
   }
 
   const sign = match[1] as '-' | ''
@@ -163,7 +268,10 @@ export function splitNumber(value: string): NumberSplit {
     .replace(/0*$/, '') // remove trailing zeros
 
   // normalize zero, for example normalizes 0e5 or -0 into 0
-  return digits.length > 0 ? { sign, digits, exponent } : { sign: '', digits: '0', exponent: 0 }
+  const split: NumberSplit =
+    digits.length > 0 ? { sign, digits, exponent } : { sign: '', digits: '0', exponent: 0 }
+
+  return Object.freeze(split)
 }
 
 /**
