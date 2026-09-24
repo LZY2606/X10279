@@ -1,23 +1,35 @@
-import type { NumberSplit } from './types'
+import {
+  extractSignificantDigits,
+  isApproximatelySafeFloatLexeme,
+  isIntegerDigits,
+  isValidNumberLexeme,
+  tryAnalyzeNumberLexeme,
+  UnsafeNumberReason
+} from './numberLexeme.js'
+import type { NumberSplit } from './types.js'
+
+export {
+  UnsafeNumberReason,
+  countSignificantDigits,
+  extractSignificantDigits
+} from './numberLexeme.js'
+
+const INTEGER_REGEX = /^-?[0-9]+$/
 
 /**
  * Test whether a string contains an integer number
  */
 export function isInteger(value: string): boolean {
-  return INTEGER_REGEX.test(value)
+  return isIntegerDigits(value)
 }
-
-const INTEGER_REGEX = /^-?[0-9]+$/
 
 /**
  * Test whether a string contains a number
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return isValidNumberLexeme(value)
 }
-
-const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 /**
  * Test whether a string can be safely represented with a number
@@ -26,6 +38,10 @@ const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
  * When approx is true, floating point numbers that lose a few digits but
  * are still approximately equal in value are considered safe too.
  * Integer numbers must still be exactly equal.
+ *
+ * For a valid JSON number lexeme the decision comes from the same immutable
+ * lexeme analysis used by parse/valueOf/stringify. Free-form numeric text
+ * that is not a strict lexeme keeps the historical lenient behavior.
  */
 export function isSafeNumber(
   value: string,
@@ -33,7 +49,35 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
+  const lexeme = tryAnalyzeNumberLexeme(value)
+
+  if (lexeme !== undefined) {
+    if (lexeme.isIntegerLexeme) {
+      return lexeme.strategy === 'safe_number'
+    }
+
+    if (lexeme.strategy === 'safe_number') {
+      return true
+    }
+
+    return config?.approx === true ? isApproximatelySafeFloatLexeme(lexeme) : false
+  }
+
+  return isSafeNumberFallback(value, config)
+}
+
+/**
+ * Historical lenient behavior for text that is not a strict JSON number
+ * lexeme (for example leading zeros or a leading dot). Composed from the
+ * same shared text primitives; the strict lexeme path does not use it.
+ */
+function isSafeNumberFallback(
+  value: string,
+  config?: {
+    approx: boolean
+  }
+): boolean {
+  if (INTEGER_REGEX.test(value)) {
     return Number.isSafeInteger(Number.parseInt(value, 10))
   }
 
@@ -52,13 +96,9 @@ export function isSafeNumber(
   }
 
   if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
     const requiredDigits = 14
     if (
-      !isInteger(value) &&
+      !INTEGER_REGEX.test(value) &&
       parsedDigits.length >= requiredDigits &&
       valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
     ) {
@@ -69,24 +109,25 @@ export function isSafeNumber(
   return false
 }
 
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
-}
-
 /**
  * When the provided value is an unsafe number, describe what the reason is:
  * overflow, underflow, truncate_integer, or truncate_float.
  * Returns undefined when the value is safe.
+ *
+ * Valid JSON number lexemes get their reason from the shared immutable lexeme
+ * analysis; other numeric text keeps the historical derived behavior.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
+  const lexeme = tryAnalyzeNumberLexeme(value)
+  if (lexeme !== undefined) {
+    return lexeme.unsafeReason
+  }
+
+  if (isSafeNumberFallback(value)) {
     return undefined
   }
 
-  if (isInteger(value)) {
+  if (INTEGER_REGEX.test(value)) {
     return UnsafeNumberReason.truncate_integer
   }
 
@@ -192,80 +233,4 @@ export function compareNumber(a: string, b: string): 1 | 0 | -1 {
   }
 
   return aa.digits > bb.digits ? sign : aa.digits < bb.digits ? (-sign as Sign) : 0
-}
-
-/**
- * Count the significant digits of a number.
- *
- * For example:
- *   '2.34' returns 3
- *   '-77' returns 2
- *   '0.003400' returns 2
- *   '120.5e+30' returns 4
- **/
-export function countSignificantDigits(value: string): number {
-  const { start, end } = getSignificantDigitRange(value)
-
-  const dot = value.indexOf('.')
-  if (dot === -1 || dot < start || dot > end) {
-    return end - start
-  }
-
-  return end - start - 1
-}
-
-/**
- * Get the significant digits of a number.
- *
- * For example:
- *   '2.34' returns '234'
- *   '-77' returns '77'
- *   '0.003400' returns '34'
- *   '120.5e+30' returns '1205'
- **/
-export function extractSignificantDigits(value: string): string {
-  const { start, end } = getSignificantDigitRange(value)
-
-  const digits = value.substring(start, end)
-
-  const dot = digits.indexOf('.')
-  if (dot === -1) {
-    return digits
-  }
-
-  return digits.substring(0, dot) + digits.substring(dot + 1)
-}
-
-/**
- * Returns the range (start to end) of the significant digits of a value.
- * Note that this range _may_ contain the decimal dot.
- *
- * For example:
- *
- *     getSignificantDigitRange('0.0325900') // { start: 3, end: 7 }
- *     getSignificantDigitRange('2.0300')    // { start: 0, end: 3 }
- *     getSignificantDigitRange('0.0')       // { start: 3, end: 3 }
- *
- */
-function getSignificantDigitRange(value: string): { start: number; end: number } {
-  let start = 0
-  if (value[0] === '-') {
-    start++
-  }
-  while (value[start] === '0' || value[start] === '.') {
-    start++
-  }
-
-  let end = value.lastIndexOf('e')
-  if (end === -1) {
-    end = value.lastIndexOf('E')
-  }
-  if (end === -1) {
-    end = value.length
-  }
-  while ((value[end - 1] === '0' || value[end - 1] === '.') && end > start) {
-    end--
-  }
-
-  return { start, end }
 }

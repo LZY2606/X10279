@@ -1,3 +1,4 @@
+import { scanNumberLexeme } from './numberLexeme.js'
 import { parseLosslessNumber } from './numberParsers.js'
 import { revive } from './revive.js'
 import type { DuplicateKeyInfo, GenericObject, NumberParser, ParseOptions, Reviver } from './types'
@@ -201,43 +202,17 @@ export function parse(
   }
 
   function parseNumeric() {
-    const start = i
-    if (text.charCodeAt(i) === codeMinus) {
-      i++
-      expectDigit(start)
+    // The shared scanner classifies the lexeme straight from the raw text:
+    // it never routes it through Number first, and its SyntaxError keeps the
+    // original position. A scanned lexeme is guaranteed to be strict JSON.
+    const scanned = scanNumberLexeme(text, i)
+    if (scanned === undefined) {
+      return undefined
     }
 
-    if (text.charCodeAt(i) === codeZero) {
-      i++
-    } else if (isNonZeroDigit(text.charCodeAt(i))) {
-      i++
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
+    i = scanned.end
 
-    if (text.charCodeAt(i) === codeDot) {
-      i++
-      expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
-
-    if (text.charCodeAt(i) === codeLowercaseE || text.charCodeAt(i) === codeUppercaseE) {
-      i++
-      if (text.charCodeAt(i) === codeMinus || text.charCodeAt(i) === codePlus) {
-        i++
-      }
-      expectDigit(start)
-      while (isDigit(text.charCodeAt(i))) {
-        i++
-      }
-    }
-
-    if (i > start) {
-      return parseNumber(text.slice(start, i))
-    }
+    return parseNumber(scanned.lexeme)
   }
 
   function eatComma() {
@@ -269,13 +244,6 @@ export function parse(
   function expectEndOfInput() {
     if (i < text.length) {
       throw new SyntaxError(`Expected end of input ${gotAt()}`)
-    }
-  }
-
-  function expectDigit(start: number) {
-    if (!isDigit(text.charCodeAt(i))) {
-      const numSoFar = text.slice(start, i)
-      throw new SyntaxError(`Invalid number '${numSoFar}', expecting a digit ${gotAt()}`)
     }
   }
 
@@ -343,14 +311,6 @@ function isHex(code: number): boolean {
     (code >= codeUppercaseA && code <= codeUppercaseF) ||
     (code >= codeLowercaseA && code <= codeLowercaseF)
   )
-}
-
-function isDigit(code: number): boolean {
-  return code >= codeZero && code <= codeNine
-}
-
-function isNonZeroDigit(code: number): boolean {
-  return code >= codeOne && code <= codeNine
 }
 
 export function isValidStringCharacter(code: number): boolean {

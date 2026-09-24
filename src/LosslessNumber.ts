@@ -1,14 +1,13 @@
-import {
-  compareNumber,
-  countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
-} from './utils.js'
+import { analyzeNumberLexeme, LEXEME_BRAND, type NumberLexeme } from './numberLexeme.js'
+import { compareNumber, countSignificantDigits } from './utils.js'
 
 /**
- * A lossless number. Stores its numeric value as string
+ * A lossless number. Stores its numeric value as string.
+ *
+ * The conversion decision of `valueOf()` is derived from the immutable
+ * {@link NumberLexeme} analysis produced at construction time. That analysis
+ * is the exact same one used by `parse`, `parseLosslessNumber` and
+ * `stringify`, so every entry point agrees on classification and strategy.
  */
 export class LosslessNumber {
   // numeric value as string
@@ -17,19 +16,33 @@ export class LosslessNumber {
   // type information
   isLosslessNumber = true
 
+  // Immutable lexical analysis backing the conversion decision.
+  // Non-enumerable so it neither changes the public shape nor serializes.
+  declare readonly [LEXEME_BRAND]: NumberLexeme
+
   constructor(value: string) {
-    if (!isNumber(value)) {
+    let lexeme: NumberLexeme
+    try {
+      lexeme = analyzeNumberLexeme(value)
+    } catch {
+      // Preserve the historical plain Error layer and message for callers.
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
     this.value = value
+    Object.defineProperty(this, LEXEME_BRAND, {
+      value: lexeme,
+      enumerable: false,
+      writable: false,
+      configurable: false
+    })
   }
 
   /**
    * Get the value of the LosslessNumber as number or bigint.
    *
    * - a number is returned for safe numbers and decimal values that only lose some insignificant digits
-   * - a bigint is returned for big integer numbers
+   * - a bigint is returned for big integer number tokens
    * - an Error is thrown for values that will overflow or underflow
    *
    * Note that you can implement your own strategy for conversion by just getting the value as string
@@ -37,21 +50,21 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const lexeme = this[LEXEME_BRAND]
 
     // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
+    if (lexeme.strategy === 'safe_number' || lexeme.strategy === 'truncate_float') {
       return Number.parseFloat(this.value)
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (lexeme.strategy === 'bigint') {
       return BigInt(this.value)
     }
 
     // overflow or underflow
     throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
+      `Cannot safely convert to number: the value '${this.value}' would ${lexeme.unsafeReason} and become ${Number.parseFloat(this.value)}`
     )
   }
 
@@ -64,15 +77,24 @@ export class LosslessNumber {
 
   // Note: we do NOT implement a .toJSON() method, and you should not implement
   // or use that, it cannot safely turn the numeric value in the string into
-  // stringified JSON since it has to be parsed into a number first.
+  // stringified JSON since it has to parse the number into a number first.
 }
 
 /**
- * Test whether a value is a LosslessNumber
+ * Test whether a value is a LosslessNumber.
+ *
+ * Prefers the internal immutable-lexeme brand (proving the value went through
+ * the unified analysis) and falls back to the historical duck-type brand for
+ * values produced by older/duplicated module copies.
  */
 export function isLosslessNumber(value: unknown): value is LosslessNumber {
-  // @ts-expect-error
-  return (value && typeof value === 'object' && value.isLosslessNumber) || false
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const branded = value as Record<PropertyKey, unknown>
+
+  return LEXEME_BRAND in branded || branded.isLosslessNumber === true
 }
 
 /**
