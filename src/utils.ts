@@ -1,10 +1,59 @@
 import type { NumberSplit } from './types'
 
 /**
+ * Immutable analysis of a number lexeme.
+ *
+ * This is the single source of truth for classifying a JSON number lexeme
+ * and for deciding how the lexeme is converted into a numeric value.
+ * The classification is purely lexical: it never routes the lexeme through
+ * `Number` first, so no precision is lost before the conversion decision
+ * is made. The result is frozen and carries no caches, counters, or other
+ * mutable state, so repeated analysis of the same lexeme always yields an
+ * equal result regardless of call order or previous failures.
+ *
+ * Note: this is an internal building block shared by the production code
+ * paths of `parse` (via `parseLosslessNumber`/`LosslessNumber`),
+ * `parseNumberAndBigInt`, `LosslessNumber.valueOf`, and `stringify`.
+ * It is deliberately not exported from the public index.
+ */
+export interface NumberLexemeAnalysis {
+  // the analyzed lexeme
+  readonly value: string
+  // whether the lexeme is a valid JSON number
+  readonly isNumber: boolean
+  // whether the lexeme is an integer number (no fraction, no exponent)
+  readonly isInteger: boolean
+  // why the lexeme is unsafe to convert to a number, or undefined when safe
+  readonly unsafeReason: UnsafeNumberReason | undefined
+}
+
+/**
+ * Analyze a number lexeme once, and derive all classification and
+ * conversion decisions from the returned immutable analysis result.
+ */
+export function analyzeNumberLexeme(value: string): NumberLexemeAnalysis {
+  const isNumberLexeme = NUMBER_REGEX.test(value)
+
+  const analysis: NumberLexemeAnalysis = {
+    value,
+    isNumber: isNumberLexeme,
+    isInteger: INTEGER_REGEX.test(value),
+    // computed lazily so that constructing a LosslessNumber (which only
+    // needs the lexical checks) stays cheap; the getter is pure and the
+    // frozen analysis object itself holds no memoized state
+    get unsafeReason() {
+      return isNumberLexeme ? getUnsafeNumberReason(value) : undefined
+    }
+  }
+
+  return Object.freeze(analysis)
+}
+
+/**
  * Test whether a string contains an integer number
  */
 export function isInteger(value: string): boolean {
-  return INTEGER_REGEX.test(value)
+  return analyzeNumberLexeme(value).isInteger
 }
 
 const INTEGER_REGEX = /^-?[0-9]+$/
@@ -14,7 +63,7 @@ const INTEGER_REGEX = /^-?[0-9]+$/
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return analyzeNumberLexeme(value).isNumber
 }
 
 const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
