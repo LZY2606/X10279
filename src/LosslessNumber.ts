@@ -1,14 +1,18 @@
 import {
-  compareNumber,
+  analyzeNumberLexeme,
+  compareAnalyzedNumbers,
+  conversionStrategyFromAnalysis,
   countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
-} from './utils.js'
+  type NumberLexemeAnalysis
+} from './numberLexeme.js'
 
 /**
- * A lossless number. Stores its numeric value as string
+ * A lossless number. Stores its numeric value as string.
+ *
+ * The conversion strategy for the stored token is decided once, at
+ * construction time, by the shared {@link analyzeNumberLexeme} result. The
+ * analysis is immutable and is the exact same piece of logic used by
+ * `parse`, `parseLosslessNumber`, `isLosslessNumber` and `stringify`.
  */
 export class LosslessNumber {
   // numeric value as string
@@ -17,12 +21,30 @@ export class LosslessNumber {
   // type information
   isLosslessNumber = true
 
+  // Shared, immutable lexeme analysis backing every conversion decision.
+  // Held in a private field: it is observable only through the library-level
+  // helper `getNumberLexemeAnalysis`, never as enumerable object state.
+  readonly #analysis: NumberLexemeAnalysis
+
   constructor(value: string) {
-    if (!isNumber(value)) {
+    const analysis = analyzeNumberLexeme(value)
+    if (!analysis.valid) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
     this.value = value
+    this.#analysis = analysis
+  }
+
+  /**
+   * Internal-only accessor used by the library itself (comparison) and by
+   * the behavior-guard tests to assert on JSON number lexeme / conversion
+   * strategy invariants. It does not expose an alternative construction path:
+   * it returns the same frozen analysis produced on the production path.
+   * @internal
+   */
+  get analysis(): NumberLexemeAnalysis {
+    return this.#analysis
   }
 
   /**
@@ -37,21 +59,21 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const strategy = conversionStrategyFromAnalysis(this.#analysis)
 
     // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
+    if (strategy === 'number' || strategy === 'truncate_float') {
       return Number.parseFloat(this.value)
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (strategy === 'bigint') {
       return BigInt(this.value)
     }
 
     // overflow or underflow
     throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
+      `Cannot safely convert to number: the value '${this.value}' would ${strategy} and become ${Number.parseFloat(this.value)}`
     )
   }
 
@@ -68,11 +90,27 @@ export class LosslessNumber {
 }
 
 /**
- * Test whether a value is a LosslessNumber
+ * Test whether a value is a LosslessNumber.
+ *
+ * This is the single brand check shared by the parser, reviver and stringifier
+ * so that every entry point classifies lossless numbers identically.
  */
 export function isLosslessNumber(value: unknown): value is LosslessNumber {
-  // @ts-expect-error
-  return (value && typeof value === 'object' && value.isLosslessNumber) || false
+  return (value && typeof value === 'object' && value.isLosslessNumber === true) || false
+}
+
+/**
+ * Internal-only: return the immutable lexeme analysis attached to a
+ * LosslessNumber created through the public API, or undefined for other
+ * values. The returned object is frozen and shared with the production
+ * conversion path (no test-only recomputation).
+ * @internal
+ */
+export function getNumberLexemeAnalysis(value: unknown): NumberLexemeAnalysis | undefined {
+  if (isLosslessNumber(value)) {
+    return value.analysis
+  }
+  return undefined
 }
 
 /**
@@ -104,5 +142,5 @@ export function toLosslessNumber(value: number): LosslessNumber {
  * and -1 when a is smaller than b.
  */
 export function compareLosslessNumber(a: LosslessNumber, b: LosslessNumber): 1 | 0 | -1 {
-  return compareNumber(a.value, b.value)
+  return compareAnalyzedNumbers(a.analysis, b.analysis)
 }

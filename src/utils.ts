@@ -1,7 +1,23 @@
+import {
+  analyzeNumberLexeme,
+  compareAnalyzedNumbers,
+  countSignificantDigits as countSignificantDigitsFromLexeme,
+  extractSignificantDigits as extractSignificantDigitsFromLexeme,
+  getUnsafeReasonFromAnalysis,
+  NUMBER_GRAMMAR,
+  UnsafeNumberReason
+} from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
+// Re-export the shared enum so existing imports keep working.
+export { UnsafeNumberReason }
+
 /**
- * Test whether a string contains an integer number
+ * Test whether a string contains an integer number.
+ *
+ * Deliberately the purely structural, lenient test used historically (it
+ * accepts leading zeros); strict conversion decisions come from
+ * {@link analyzeNumberLexeme} in numberLexeme.ts.
  */
 export function isInteger(value: string): boolean {
   return INTEGER_REGEX.test(value)
@@ -14,10 +30,8 @@ const INTEGER_REGEX = /^-?[0-9]+$/
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return NUMBER_GRAMMAR.test(value)
 }
-
-const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 /**
  * Test whether a string can be safely represented with a number
@@ -26,8 +40,53 @@ const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
  * When approx is true, floating point numbers that lose a few digits but
  * are still approximately equal in value are considered safe too.
  * Integer numbers must still be exactly equal.
+ *
+ * For valid JSON number lexemes the decision comes from the shared immutable
+ * {@link analyzeNumberLexeme} result. Invalid input keeps the historical,
+ * lenient `Number`-based fallback so the public contract does not change.
  */
 export function isSafeNumber(
+  value: string,
+  config?: {
+    approx: boolean
+  }
+): boolean {
+  const analysis = analyzeNumberLexeme(value)
+
+  if (!analysis.valid) {
+    return isSafeNumberLegacy(value, config)
+  }
+
+  if (analysis.isStrictInteger) {
+    return getUnsafeReasonFromAnalysis(analysis) === undefined
+  }
+
+  const reason = getUnsafeReasonFromAnalysis(analysis)
+  if (reason === undefined) {
+    return true
+  }
+
+  if (config?.approx === true && reason === UnsafeNumberReason.truncate_float) {
+    // A value is approximately equal when:
+    // 1. it is a floating point number, not an integer
+    // 2. it has at least 14 digits
+    // 3. the first 14 digits are equal
+    const requiredDigits = 14
+    const parsed = String(Number.parseFloat(value))
+    const valueDigits = extractSignificantDigits(value)
+    const parsedDigits = extractSignificantDigits(parsed)
+    if (
+      parsedDigits.length >= requiredDigits &&
+      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function isSafeNumberLegacy(
   value: string,
   config?: {
     approx: boolean
@@ -52,10 +111,6 @@ export function isSafeNumber(
   }
 
   if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
     const requiredDigits = 14
     if (
       !isInteger(value) &&
@@ -69,20 +124,19 @@ export function isSafeNumber(
   return false
 }
 
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
-}
-
 /**
  * When the provided value is an unsafe number, describe what the reason is:
  * overflow, underflow, truncate_integer, or truncate_float.
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis.valid) {
+    return getUnsafeReasonFromAnalysis(analysis)
+  }
+
+  // Legacy fallback for non-lexeme input, unchanged.
+  if (isSafeNumberLegacy(value, { approx: false })) {
     return undefined
   }
 
@@ -170,12 +224,27 @@ export function splitNumber(value: string): NumberSplit {
  * Compare two strings containing a numeric value
  * Returns 1 when a is larger than b, 0 when they are equal,
  * and -1 when a is smaller than b.
+ *
+ * Valid JSON number lexemes are compared directly from the immutable
+ * {@link analyzeNumberLexeme} result (exact, no `Number` rounding, safe for
+ * extreme exponents). Lenient forms that are not strict JSON lexemes (such as
+ * '02.3') fall back to the historical split-based comparison unchanged.
  */
 export function compareNumber(a: string, b: string): 1 | 0 | -1 {
   if (a === b) {
     return 0
   }
 
+  const left = analyzeNumberLexeme(a)
+  const right = analyzeNumberLexeme(b)
+  if (left.valid && right.valid) {
+    return compareAnalyzedNumbers(left, right)
+  }
+
+  return compareNumberLegacy(a, b)
+}
+
+function compareNumberLegacy(a: string, b: string): 1 | 0 | -1 {
   const aa = splitNumber(a)
   const bb = splitNumber(b)
 
@@ -194,78 +263,10 @@ export function compareNumber(a: string, b: string): 1 | 0 | -1 {
   return aa.digits > bb.digits ? sign : aa.digits < bb.digits ? (-sign as Sign) : 0
 }
 
-/**
- * Count the significant digits of a number.
- *
- * For example:
- *   '2.34' returns 3
- *   '-77' returns 2
- *   '0.003400' returns 2
- *   '120.5e+30' returns 4
- **/
 export function countSignificantDigits(value: string): number {
-  const { start, end } = getSignificantDigitRange(value)
-
-  const dot = value.indexOf('.')
-  if (dot === -1 || dot < start || dot > end) {
-    return end - start
-  }
-
-  return end - start - 1
+  return countSignificantDigitsFromLexeme(value)
 }
 
-/**
- * Get the significant digits of a number.
- *
- * For example:
- *   '2.34' returns '234'
- *   '-77' returns '77'
- *   '0.003400' returns '34'
- *   '120.5e+30' returns '1205'
- **/
 export function extractSignificantDigits(value: string): string {
-  const { start, end } = getSignificantDigitRange(value)
-
-  const digits = value.substring(start, end)
-
-  const dot = digits.indexOf('.')
-  if (dot === -1) {
-    return digits
-  }
-
-  return digits.substring(0, dot) + digits.substring(dot + 1)
-}
-
-/**
- * Returns the range (start to end) of the significant digits of a value.
- * Note that this range _may_ contain the decimal dot.
- *
- * For example:
- *
- *     getSignificantDigitRange('0.0325900') // { start: 3, end: 7 }
- *     getSignificantDigitRange('2.0300')    // { start: 0, end: 3 }
- *     getSignificantDigitRange('0.0')       // { start: 3, end: 3 }
- *
- */
-function getSignificantDigitRange(value: string): { start: number; end: number } {
-  let start = 0
-  if (value[0] === '-') {
-    start++
-  }
-  while (value[start] === '0' || value[start] === '.') {
-    start++
-  }
-
-  let end = value.lastIndexOf('e')
-  if (end === -1) {
-    end = value.lastIndexOf('E')
-  }
-  if (end === -1) {
-    end = value.length
-  }
-  while ((value[end - 1] === '0' || value[end - 1] === '.') && end > start) {
-    end--
-  }
-
-  return { start, end }
+  return extractSignificantDigitsFromLexeme(value)
 }
