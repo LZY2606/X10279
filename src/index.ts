@@ -11,11 +11,13 @@ export { reviveDate } from './reviveDate.js'
 export { stringify } from './stringify.js'
 export * from './types.js'
 export {
+  analyzeNumberLexeme,
   compareNumber,
   getUnsafeNumberReason,
   isInteger,
   isNumber,
   isSafeNumber,
+  type NumberLexemeAnalysis,
   splitNumber,
   toSafeNumberOrThrow,
   UnsafeNumberReason

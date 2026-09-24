@@ -1,6 +1,34 @@
 import type { NumberSplit } from './types'
 
 /**
+ * Immutable analysis of a number lexeme.
+ *
+ * This is the single source of truth for the classification of a number
+ * lexeme and the resulting conversion decision. All public entry points
+ * that have to classify or convert a number lexeme (parse,
+ * parseLosslessNumber, isLosslessNumber, stringify, isSafeNumber,
+ * getUnsafeNumberReason, toSafeNumberOrThrow, LosslessNumber) derive their
+ * decision from this shared analysis, so they can never disagree.
+ *
+ * The returned object is frozen: it is a pure function of the lexeme and
+ * carries no cache, counter, or other mutable state between calls.
+ */
+export interface NumberLexemeAnalysis {
+  // the analyzed number lexeme, exactly as found in the input
+  readonly lexeme: string
+
+  // whether the lexeme is a valid JSON number
+  readonly isNumber: boolean
+
+  // whether the lexeme is an integer number (only meaningful when isNumber)
+  readonly isInteger: boolean
+
+  // the reason why converting the lexeme to a number is unsafe,
+  // or undefined when the conversion is safe (only meaningful when isNumber)
+  readonly unsafeReason: UnsafeNumberReason | undefined
+}
+
+/**
  * Test whether a string contains an integer number
  */
 export function isInteger(value: string): boolean {
@@ -20,6 +48,57 @@ export function isNumber(value: string): boolean {
 const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
 /**
+ * Analyze a number lexeme once and return an immutable classification.
+ *
+ * The analysis is purely lexical: the lexeme itself is never converted via
+ * Number before the classification is fixed, so no precision can be lost
+ * ahead of the conversion decision.
+ */
+export function analyzeNumberLexeme(value: string): NumberLexemeAnalysis {
+  if (!NUMBER_REGEX.test(value)) {
+    return Object.freeze({
+      lexeme: value,
+      isNumber: false,
+      isInteger: false,
+      unsafeReason: undefined
+    })
+  }
+
+  const integer = INTEGER_REGEX.test(value)
+  let unsafeReason: UnsafeNumberReason | undefined
+
+  if (integer) {
+    unsafeReason = Number.isSafeInteger(Number.parseInt(value, 10))
+      ? undefined
+      : UnsafeNumberReason.truncate_integer
+  } else {
+    const num = Number.parseFloat(value)
+
+    if (!Number.isFinite(num)) {
+      unsafeReason = UnsafeNumberReason.overflow
+    } else if (num === 0) {
+      // a zero is only exact when the lexeme has no significant digits,
+      // otherwise the value underflows to zero
+      unsafeReason =
+        extractSignificantDigits(value) === '' ? undefined : UnsafeNumberReason.underflow
+    } else {
+      const parsed = String(num)
+      unsafeReason =
+        value === parsed || extractSignificantDigits(value) === extractSignificantDigits(parsed)
+          ? undefined
+          : UnsafeNumberReason.truncate_float
+    }
+  }
+
+  return Object.freeze({
+    lexeme: value,
+    isNumber: true,
+    isInteger: integer,
+    unsafeReason
+  })
+}
+
+/**
  * Test whether a string can be safely represented with a number
  * without information loss.
  *
@@ -33,37 +112,29 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
+  const analysis = analyzeNumberLexeme(value)
+
+  if (!analysis.isNumber) {
+    return false
   }
 
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
-
-  if (value === parsed) {
+  if (analysis.unsafeReason === undefined) {
     return true
   }
 
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
-    return true
-  }
-
-  if (config?.approx === true) {
+  if (config?.approx === true && analysis.unsafeReason === UnsafeNumberReason.truncate_float) {
     // A value is approximately equal when:
     // 1. it is a floating point number, not an integer
     // 2. it has at least 14 digits
     // 3. the first 14 digits are equal
     const requiredDigits = 14
-    if (
-      !isInteger(value) &&
+    const valueDigits = extractSignificantDigits(value)
+    const parsedDigits = extractSignificantDigits(String(Number.parseFloat(value)))
+
+    return (
       parsedDigits.length >= requiredDigits &&
       valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
-    ) {
-      return true
-    }
+    )
   }
 
   return false
@@ -82,24 +153,11 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
-    return undefined
-  }
+  const analysis = analyzeNumberLexeme(value)
 
-  if (isInteger(value)) {
-    return UnsafeNumberReason.truncate_integer
-  }
-
-  const num = Number.parseFloat(value)
-  if (!Number.isFinite(num)) {
-    return UnsafeNumberReason.overflow
-  }
-
-  if (num === 0) {
-    return UnsafeNumberReason.underflow
-  }
-
-  return UnsafeNumberReason.truncate_float
+  // for historic reasons, a value that is not a valid number at all is
+  // reported as overflow: Number.parseFloat returns NaN, which is not finite
+  return analysis.isNumber ? analysis.unsafeReason : UnsafeNumberReason.overflow
 }
 
 /**
