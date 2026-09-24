@@ -1,9 +1,6 @@
 import {
+  analyzeNumberLexeme,
   compareNumber,
-  countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
   UnsafeNumberReason
 } from './utils.js'
 
@@ -18,7 +15,7 @@ export class LosslessNumber {
   isLosslessNumber = true
 
   constructor(value: string) {
-    if (!isNumber(value)) {
+    if (!analyzeNumberLexeme(value).isNumber) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
@@ -37,21 +34,23 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    // all conversion decisions are derived from a single immutable analysis
+    const analysis = analyzeNumberLexeme(this.value)
+    const unsafeReason = analysis.unsafeReason
 
     // safe or truncate_float
     if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
-      return Number.parseFloat(this.value)
+      return analysis.floatValue
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (unsafeReason === UnsafeNumberReason.truncate_integer) {
       return BigInt(this.value)
     }
 
     // overflow or underflow
     throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
+      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${analysis.floatValue}`
     )
   }
 
@@ -81,7 +80,7 @@ export function isLosslessNumber(value: unknown): value is LosslessNumber {
  */
 export function toLosslessNumber(value: number): LosslessNumber {
   const maxDigits = 15
-  if (countSignificantDigits(String(value)) > maxDigits) {
+  if (analyzeNumberLexeme(String(value)).significantDigitCount > maxDigits) {
     throw new Error(
       `Invalid number: contains more than 15 digits and is most likely truncated and unsafe by itself (value: ${value})`
     )

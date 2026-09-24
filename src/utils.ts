@@ -19,6 +19,94 @@ export function isNumber(value: string): boolean {
 
 const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 
+export enum UnsafeNumberReason {
+  underflow = 'underflow',
+  overflow = 'overflow',
+  truncate_integer = 'truncate_integer',
+  truncate_float = 'truncate_float'
+}
+
+/**
+ * The immutable result of analyzing a number lexeme: the single source of
+ * truth for classifying a numeric string and deciding how to convert it.
+ *
+ * This is an internal building block, shared by the production code paths of
+ * `parse` (via `parseLosslessNumber` and the `LosslessNumber` constructor),
+ * `LosslessNumber.valueOf`, `toLosslessNumber`, `parseNumberAndBigInt`,
+ * `isSafeNumber`, `getUnsafeNumberReason`, `toSafeNumberOrThrow`, and the
+ * number validation in `stringify`. It is deliberately not re-exported from
+ * the public API in `index.ts`: only the existing derived public functions
+ * are part of the API.
+ *
+ * The analysis itself is purely string based: the lexeme is never
+ * round-tripped through `Number`, so no precision is lost. The floating
+ * point approximation `floatValue` is only used to classify safety,
+ * never to represent the value itself.
+ */
+export interface NumberLexemeAnalysis {
+  /** the original lexeme, exactly as provided */
+  readonly value: string
+  /** whether the lexeme matches the JSON number grammar */
+  readonly isNumber: boolean
+  /** whether the lexeme is an integer (no decimal mark, no exponent) */
+  readonly isInteger: boolean
+  /** the significant digits of the lexeme */
+  readonly significantDigits: string
+  /** the number of significant digits of the lexeme */
+  readonly significantDigitCount: number
+  /** the floating point approximation of the lexeme, used for safety classification only */
+  readonly floatValue: number
+  /** the significant digits of the floating point approximation */
+  readonly floatSignificantDigits: string
+  /** the reason why the lexeme is unsafe as a number, or undefined when safe */
+  readonly unsafeReason: UnsafeNumberReason | undefined
+}
+
+/**
+ * Analyze a number lexeme once, and return an immutable analysis result
+ * from which all classification and conversion decisions are derived.
+ */
+export function analyzeNumberLexeme(value: string): NumberLexemeAnalysis {
+  const isNumberLexeme = NUMBER_REGEX.test(value)
+  const integer = INTEGER_REGEX.test(value)
+  const significantDigits = extractSignificantDigits(value)
+  const significantDigitCount = countSignificantDigits(value)
+  const floatValue = Number.parseFloat(value)
+  const floatSignificantDigits = extractSignificantDigits(String(floatValue))
+
+  let safe: boolean
+  if (integer) {
+    safe = Number.isSafeInteger(Number.parseInt(value, 10))
+  } else {
+    const parsed = String(floatValue)
+    safe = value === parsed || significantDigits === floatSignificantDigits
+  }
+
+  let unsafeReason: UnsafeNumberReason | undefined
+  if (!safe) {
+    if (integer) {
+      unsafeReason = UnsafeNumberReason.truncate_integer
+    } else if (!Number.isFinite(floatValue)) {
+      unsafeReason = UnsafeNumberReason.overflow
+    } else if (floatValue === 0) {
+      unsafeReason = UnsafeNumberReason.underflow
+    } else {
+      unsafeReason = UnsafeNumberReason.truncate_float
+    }
+  }
+
+  return Object.freeze({
+    value,
+    isNumber: isNumberLexeme,
+    isInteger: integer,
+    significantDigits,
+    significantDigitCount,
+    floatValue,
+    floatSignificantDigits,
+    unsafeReason
+  })
+}
+
 /**
  * Test whether a string can be safely represented with a number
  * without information loss.
@@ -33,47 +121,27 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
-  }
+  const analysis = analyzeNumberLexeme(value)
 
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
-
-  if (value === parsed) {
+  if (analysis.unsafeReason === undefined) {
     return true
   }
 
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
-    return true
-  }
-
-  if (config?.approx === true) {
+  if (config?.approx === true && analysis.unsafeReason === UnsafeNumberReason.truncate_float) {
     // A value is approximately equal when:
     // 1. it is a floating point number, not an integer
     // 2. it has at least 14 digits
     // 3. the first 14 digits are equal
     const requiredDigits = 14
-    if (
-      !isInteger(value) &&
-      parsedDigits.length >= requiredDigits &&
-      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
-    ) {
-      return true
-    }
+    return (
+      analysis.floatSignificantDigits.length >= requiredDigits &&
+      analysis.significantDigits.startsWith(
+        analysis.floatSignificantDigits.substring(0, requiredDigits)
+      )
+    )
   }
 
   return false
-}
-
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
 }
 
 /**
@@ -82,24 +150,7 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
-    return undefined
-  }
-
-  if (isInteger(value)) {
-    return UnsafeNumberReason.truncate_integer
-  }
-
-  const num = Number.parseFloat(value)
-  if (!Number.isFinite(num)) {
-    return UnsafeNumberReason.overflow
-  }
-
-  if (num === 0) {
-    return UnsafeNumberReason.underflow
-  }
-
-  return UnsafeNumberReason.truncate_float
+  return analyzeNumberLexeme(value).unsafeReason
 }
 
 /**
@@ -112,9 +163,9 @@ export function toSafeNumberOrThrow(
     approx: boolean
   }
 ): number {
-  const number = Number.parseFloat(value)
+  const analysis = analyzeNumberLexeme(value)
+  const unsafeReason = analysis.unsafeReason
 
-  const unsafeReason = getUnsafeNumberReason(value)
   if (
     config?.approx === true
       ? unsafeReason && unsafeReason !== UnsafeNumberReason.truncate_float
@@ -122,11 +173,11 @@ export function toSafeNumberOrThrow(
   ) {
     const unsafeReasonText = unsafeReason?.replace(/_\w+$/, '')
     throw new Error(
-      `Cannot safely convert to number: the value '${value}' would ${unsafeReasonText} and become ${number}`
+      `Cannot safely convert to number: the value '${value}' would ${unsafeReasonText} and become ${analysis.floatValue}`
     )
   }
 
-  return number
+  return analysis.floatValue
 }
 
 /**
