@@ -1,4 +1,5 @@
 import { LosslessNumber } from './LosslessNumber.js'
+import { analyzeNumberLexeme } from './numberLexeme.js'
 import { isInteger } from './utils.js'
 
 export function parseLosslessNumber(value: string): LosslessNumber {
@@ -6,5 +7,8 @@ export function parseLosslessNumber(value: string): LosslessNumber {
 }
 
 export function parseNumberAndBigInt(value: string): number | bigint {
-  return isInteger(value) ? BigInt(value) : Number.parseFloat(value)
+  const analysis = analyzeNumberLexeme(value)
+  const integer = analysis.valid ? analysis.isInteger : isInteger(value)
+
+  return integer ? BigInt(value) : Number.parseFloat(value)
 }

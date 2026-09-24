@@ -1,11 +1,25 @@
-import {
-  compareNumber,
-  countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
-  UnsafeNumberReason
-} from './utils.js'
+import { compareNumber, countSignificantDigits } from './utils.js'
+import { analyzeNumberLexeme, decideNumberConversion } from './numberLexeme.js'
+
+/**
+ * Per-instance immutable lexical analysis. The map is module-private and only
+ * caches the frozen analysis of already-constructed numbers: it never carries
+ * temporary state from failed calls (invalid values throw before an entry is
+ * created) and it does not influence the result of any other entry point.
+ */
+const analysisByNumber = new WeakMap<LosslessNumber, Readonly<
+  ReturnType<typeof analyzeNumberLexeme>
+>>()
+
+/**
+ * Return (for internal callers in this package) the single immutable analysis
+ * on which every conversion decision of a LosslessNumber is based.
+ */
+export function getNumberLexemeAnalysis(
+  number: LosslessNumber
+): Readonly<ReturnType<typeof analyzeNumberLexeme>> {
+  return analysisByNumber.get(number) as ReturnType<typeof analyzeNumberLexeme>
+}
 
 /**
  * A lossless number. Stores its numeric value as string
@@ -18,11 +32,13 @@ export class LosslessNumber {
   isLosslessNumber = true
 
   constructor(value: string) {
-    if (!isNumber(value)) {
+    const analysis = analyzeNumberLexeme(value)
+    if (!analysis.valid) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
     this.value = value
+    analysisByNumber.set(this, analysis)
   }
 
   /**
@@ -37,22 +53,19 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const analysis = getNumberLexemeAnalysis(this)
+    const decision = decideNumberConversion(analysis, false)
 
-    // safe or truncate_float
-    if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
-      return Number.parseFloat(this.value)
+    switch (decision.kind) {
+      case 'number':
+        return decision.value
+      case 'bigint':
+        return decision.value
+      case 'error':
+        throw new Error(
+          `Cannot safely convert to number: the value '${this.value}' would ${decision.reason} and become ${decision.value}`
+        )
     }
-
-    // truncate_integer
-    if (isInteger(this.value)) {
-      return BigInt(this.value)
-    }
-
-    // overflow or underflow
-    throw new Error(
-      `Cannot safely convert to number: the value '${this.value}' would ${unsafeReason} and become ${Number.parseFloat(this.value)}`
-    )
   }
 
   /**

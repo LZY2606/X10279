@@ -1,3 +1,10 @@
+import {
+  analyzeNumberLexeme,
+  decideNumberConversion,
+  getUnsafeNumberReasonForAnalysis,
+  isSafeNumberAnalysis,
+  UnsafeNumberReason
+} from './numberLexeme.js'
 import type { NumberSplit } from './types'
 
 /**
@@ -26,6 +33,11 @@ const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
  * When approx is true, floating point numbers that lose a few digits but
  * are still approximately equal in value are considered safe too.
  * Integer numbers must still be exactly equal.
+ *
+ * Classification comes from the unified, immutable number lexeme analysis
+ * (see numberLexeme.ts). Inputs that are not strict JSON number lexemes
+ * (for example loose integers like '007') keep the historical behavior via
+ * the same legacy rules.
  */
 export function isSafeNumber(
   value: string,
@@ -33,48 +45,17 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
+  const approx = config?.approx ?? false
+  const analysis = analyzeNumberLexeme(value)
+
+  if (analysis.valid) {
+    return isSafeNumberAnalysis(analysis, approx)
   }
 
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
-
-  if (value === parsed) {
-    return true
-  }
-
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
-    return true
-  }
-
-  if (config?.approx === true) {
-    // A value is approximately equal when:
-    // 1. it is a floating point number, not an integer
-    // 2. it has at least 14 digits
-    // 3. the first 14 digits are equal
-    const requiredDigits = 14
-    if (
-      !isInteger(value) &&
-      parsedDigits.length >= requiredDigits &&
-      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
-    ) {
-      return true
-    }
-  }
-
-  return false
+  return legacyIsSafeNumber(value, approx)
 }
 
-export enum UnsafeNumberReason {
-  underflow = 'underflow',
-  overflow = 'overflow',
-  truncate_integer = 'truncate_integer',
-  truncate_float = 'truncate_float'
-}
+export { UnsafeNumberReason }
 
 /**
  * When the provided value is an unsafe number, describe what the reason is:
@@ -82,24 +63,13 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
-    return undefined
+  const analysis = analyzeNumberLexeme(value)
+
+  if (analysis.valid) {
+    return getUnsafeNumberReasonForAnalysis(analysis, false)
   }
 
-  if (isInteger(value)) {
-    return UnsafeNumberReason.truncate_integer
-  }
-
-  const num = Number.parseFloat(value)
-  if (!Number.isFinite(num)) {
-    return UnsafeNumberReason.overflow
-  }
-
-  if (num === 0) {
-    return UnsafeNumberReason.underflow
-  }
-
-  return UnsafeNumberReason.truncate_float
+  return legacyGetUnsafeNumberReason(value)
 }
 
 /**
@@ -127,6 +97,111 @@ export function toSafeNumberOrThrow(
   }
 
   return number
+}
+
+/**
+ * Compute the conversion decision for a (possibly non-strict) numeric string.
+ * Strict JSON lexemes use the shared immutable analysis; loose numeric text
+ * falls back to the equivalent historical rules.
+ */
+export function conversionForNumericString(
+  value: string,
+  approx: boolean
+): ReturnType<typeof decideNumberConversion> {
+  const analysis = analyzeNumberLexeme(value)
+
+  if (analysis.valid) {
+    return decideNumberConversion(analysis, approx)
+  }
+
+  return legacyConversion(value, approx)
+}
+
+function legacyIsSafeNumber(value: string, approx: boolean): boolean {
+  if (isInteger(value)) {
+    return Number.isSafeInteger(Number.parseInt(value, 10))
+  }
+
+  const num = Number.parseFloat(value)
+  const parsed = String(num)
+
+  if (value === parsed) {
+    return true
+  }
+
+  const valueDigits = extractSignificantDigits(value)
+  const parsedDigits = extractSignificantDigits(parsed)
+
+  if (valueDigits === parsedDigits) {
+    return true
+  }
+
+  if (approx) {
+    const requiredDigits = 14
+    if (
+      !isInteger(value) &&
+      parsedDigits.length >= requiredDigits &&
+      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function legacyGetUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
+  if (legacyIsSafeNumber(value, false)) {
+    return undefined
+  }
+
+  if (isInteger(value)) {
+    return UnsafeNumberReason.truncate_integer
+  }
+
+  const num = Number.parseFloat(value)
+  if (!Number.isFinite(num)) {
+    return UnsafeNumberReason.overflow
+  }
+
+  if (num === 0) {
+    return UnsafeNumberReason.underflow
+  }
+
+  return UnsafeNumberReason.truncate_float
+}
+
+function legacyConversion(
+  value: string,
+  approx: boolean
+): ReturnType<typeof decideNumberConversion> {
+  if (isInteger(value)) {
+    if (Number.isSafeInteger(Number.parseInt(value, 10))) {
+      return { kind: 'number', value: Number.parseFloat(value), truncatesFloat: false }
+    }
+
+    return { kind: 'bigint', value: BigInt(value) }
+  }
+
+  const num = Number.parseFloat(value)
+  const reason = legacyGetUnsafeNumberReason(value)
+
+  if (reason === undefined) {
+    return { kind: 'number', value: num, truncatesFloat: false }
+  }
+
+  if (reason === UnsafeNumberReason.truncate_float && !approx) {
+    return { kind: 'number', value: num, truncatesFloat: true }
+  }
+
+  if (reason === UnsafeNumberReason.truncate_float) {
+    // approx mode treats truncate_float as safe
+    return legacyIsSafeNumber(value, true)
+      ? { kind: 'number', value: num, truncatesFloat: false }
+      : { kind: 'error', reason, value: num }
+  }
+
+  return { kind: 'error', reason, value: num }
 }
 
 /**
@@ -224,8 +299,12 @@ export function countSignificantDigits(value: string): number {
  *   '120.5e+30' returns '1205'
  **/
 export function extractSignificantDigits(value: string): string {
-  const { start, end } = getSignificantDigitRange(value)
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis.valid) {
+    return analysis.significantDigits
+  }
 
+  const { start, end } = getSignificantDigitRange(value)
   const digits = value.substring(start, end)
 
   const dot = digits.indexOf('.')
