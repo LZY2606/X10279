@@ -11,6 +11,7 @@ export { reviveDate } from './reviveDate.js'
 export { stringify } from './stringify.js'
 export * from './types.js'
 export {
+  analyzeNumberLexeme,
   compareNumber,
   getUnsafeNumberReason,
   isInteger,
@@ -20,3 +21,4 @@ export {
   toSafeNumberOrThrow,
   UnsafeNumberReason
 } from './utils.js'
+export type { NumberLexemeAnalysis } from './utils.js'

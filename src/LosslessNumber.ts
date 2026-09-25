@@ -1,9 +1,7 @@
 import {
+  analyzeNumberLexeme,
   compareNumber,
   countSignificantDigits,
-  getUnsafeNumberReason,
-  isInteger,
-  isNumber,
   UnsafeNumberReason
 } from './utils.js'
 
@@ -18,7 +16,7 @@ export class LosslessNumber {
   isLosslessNumber = true
 
   constructor(value: string) {
-    if (!isNumber(value)) {
+    if (!analyzeNumberLexeme(value).isValid) {
       throw new Error(`Invalid number (value: "${value}")`)
     }
 
@@ -37,7 +35,8 @@ export class LosslessNumber {
    * and toSafeNumberOrThrow to convert it to a numeric value.
    */
   valueOf(): number | bigint {
-    const unsafeReason = getUnsafeNumberReason(this.value)
+    const analysis = analyzeNumberLexeme(this.value)
+    const unsafeReason = analysis.unsafeReason
 
     // safe or truncate_float
     if (unsafeReason === undefined || unsafeReason === UnsafeNumberReason.truncate_float) {
@@ -45,7 +44,7 @@ export class LosslessNumber {
     }
 
     // truncate_integer
-    if (isInteger(this.value)) {
+    if (analysis.isInteger) {
       return BigInt(this.value)
     }
 

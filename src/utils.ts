@@ -1,10 +1,61 @@
 import type { NumberSplit } from './types'
 
 /**
+ * The immutable result of analyzing a number lexeme (a number as it appears
+ * in a JSON text, as a string). This is the single source of truth for the
+ * classification of number lexemes: `parse`, `parseLosslessNumber`,
+ * `isLosslessNumber`/`LosslessNumber`, and `stringify` all derive their
+ * conversion decisions from this analysis.
+ *
+ * The analysis is a pure function of the lexeme string: it holds no cache,
+ * counter, or other mutable state, and the returned object is frozen.
+ * Classification is derived from the lexeme string itself; a `Number`
+ * conversion is only used to compare against the safe-integer bounds and
+ * the canonical string representation, never to alter the lexeme.
+ */
+export interface NumberLexemeAnalysis {
+  /** The analyzed number lexeme, exactly as provided */
+  readonly lexeme: string
+  /** Whether the lexeme is a valid JSON number */
+  readonly isValid: boolean
+  /** Whether the lexeme denotes an integer (no decimal dot, no exponent) */
+  readonly isInteger: boolean
+  /** Whether the lexeme can be represented with a number without information loss */
+  readonly isSafe: boolean
+  /** When not safe, the reason why; undefined when safe */
+  readonly unsafeReason: UnsafeNumberReason | undefined
+  /** The significant digits of the lexeme */
+  readonly significantDigits: string
+  /** The number of significant digits of the lexeme */
+  readonly significantDigitCount: number
+}
+
+/**
+ * Analyze a number lexeme once, returning an immutable classification that
+ * drives all conversion decisions (parse, LosslessNumber, stringify).
+ */
+export function analyzeNumberLexeme(value: string): NumberLexemeAnalysis {
+  const isValid = NUMBER_REGEX.test(value)
+  const isIntegerValue = INTEGER_REGEX.test(value)
+  const significantDigits = extractSignificantDigits(value)
+  const isSafe = isSafeNumberValue(value, isIntegerValue, significantDigits)
+
+  return Object.freeze({
+    lexeme: value,
+    isValid,
+    isInteger: isIntegerValue,
+    isSafe,
+    unsafeReason: isSafe ? undefined : classifyUnsafeNumberReason(value, isIntegerValue),
+    significantDigits,
+    significantDigitCount: significantDigits.length
+  })
+}
+
+/**
  * Test whether a string contains an integer number
  */
 export function isInteger(value: string): boolean {
-  return INTEGER_REGEX.test(value)
+  return analyzeNumberLexeme(value).isInteger
 }
 
 const INTEGER_REGEX = /^-?[0-9]+$/
@@ -14,7 +65,7 @@ const INTEGER_REGEX = /^-?[0-9]+$/
  * http://stackoverflow.com/questions/13340717/json-numbers-regular-expression
  */
 export function isNumber(value: string): boolean {
-  return NUMBER_REGEX.test(value)
+  return analyzeNumberLexeme(value).isValid
 }
 
 const NUMBER_REGEX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
@@ -33,21 +84,8 @@ export function isSafeNumber(
     approx: boolean
   }
 ): boolean {
-  if (isInteger(value)) {
-    return Number.isSafeInteger(Number.parseInt(value, 10))
-  }
-
-  const num = Number.parseFloat(value)
-  const parsed = String(num)
-
-  if (value === parsed) {
-    return true
-  }
-
-  const valueDigits = extractSignificantDigits(value)
-  const parsedDigits = extractSignificantDigits(parsed)
-
-  if (valueDigits === parsedDigits) {
+  const analysis = analyzeNumberLexeme(value)
+  if (analysis.isSafe) {
     return true
   }
 
@@ -57,16 +95,56 @@ export function isSafeNumber(
     // 2. it has at least 14 digits
     // 3. the first 14 digits are equal
     const requiredDigits = 14
+    const parsedDigits = extractSignificantDigits(String(Number.parseFloat(value)))
     if (
-      !isInteger(value) &&
+      !analysis.isInteger &&
       parsedDigits.length >= requiredDigits &&
-      valueDigits.startsWith(parsedDigits.substring(0, requiredDigits))
+      analysis.significantDigits.startsWith(parsedDigits.substring(0, requiredDigits))
     ) {
       return true
     }
   }
 
   return false
+}
+
+/**
+ * Strict safety check on a lexeme: exact round-trip through a number,
+ * or equality of the significant digits.
+ */
+function isSafeNumberValue(
+  value: string,
+  isIntegerValue: boolean,
+  significantDigits: string
+): boolean {
+  if (isIntegerValue) {
+    return Number.isSafeInteger(Number.parseInt(value, 10))
+  }
+
+  const parsed = String(Number.parseFloat(value))
+
+  return value === parsed || significantDigits === extractSignificantDigits(parsed)
+}
+
+/**
+ * Classify why a lexeme is unsafe: overflow, underflow, truncate_integer,
+ * or truncate_float.
+ */
+function classifyUnsafeNumberReason(value: string, isIntegerValue: boolean): UnsafeNumberReason {
+  if (isIntegerValue) {
+    return UnsafeNumberReason.truncate_integer
+  }
+
+  const num = Number.parseFloat(value)
+  if (!Number.isFinite(num)) {
+    return UnsafeNumberReason.overflow
+  }
+
+  if (num === 0) {
+    return UnsafeNumberReason.underflow
+  }
+
+  return UnsafeNumberReason.truncate_float
 }
 
 export enum UnsafeNumberReason {
@@ -82,24 +160,7 @@ export enum UnsafeNumberReason {
  * Returns undefined when the value is safe.
  */
 export function getUnsafeNumberReason(value: string): UnsafeNumberReason | undefined {
-  if (isSafeNumber(value, { approx: false })) {
-    return undefined
-  }
-
-  if (isInteger(value)) {
-    return UnsafeNumberReason.truncate_integer
-  }
-
-  const num = Number.parseFloat(value)
-  if (!Number.isFinite(num)) {
-    return UnsafeNumberReason.overflow
-  }
-
-  if (num === 0) {
-    return UnsafeNumberReason.underflow
-  }
-
-  return UnsafeNumberReason.truncate_float
+  return analyzeNumberLexeme(value).unsafeReason
 }
 
 /**
